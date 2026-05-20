@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  gemini-api:
+    build: .
+    image: gemini-api-wrapper:latest
+    container_name: gemini-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount your cookie file into the container (read-only is fine)
+      - ./tests/cookie.json:/app/tests/cookie.json:ro
+      # Persist auto-refreshed cookies across container restarts
+      - ./gemini_cookies:/tmp/gemini_webapi
+      # Persist generated images across container restarts
+      - ./generated_images:/app/generated_images
+    environment:
+      # Tell gemini_webapi where to save/cache rotated cookies
+      - GEMINI_COOKIE_PATH=/tmp/gemini_webapi
+      # Optional: Feishu webhook for cookie expiration alerts
+      # - FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
+      # Optional: cookie health check interval in seconds (default 300)
+      # - COOKIE_CHECK_INTERVAL=300
+      # Optional: proxy support (uncomment if needed)
+      # - HTTPS_PROXY=http://host.docker.internal:7890
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

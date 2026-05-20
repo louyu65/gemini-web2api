@@ -1,0 +1,16 @@
+# FastAPI & Server
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+
+# HTTP Client
+aiohttp>=3.9.0
+curl-cffi~=0.15.0
+
+# Data & Utils
+orjson~=3.11.7
+pydantic~=2.12.5
+loguru~=0.7.3
+
+# Optional: browser cookie auto-import
+# browser-cookie3>=0.19.0

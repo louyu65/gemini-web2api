@@ -11,7 +11,7 @@ services:
       # Mount your cookie file into the container (read-only is fine)
       - ./tests/cookie.json:/app/tests/cookie.json:ro
       # Persist auto-refreshed cookies across container restarts
-      - ./gemini_cookies:/tmp/gemini_webapi
+      #- ./gemini_cookies:/tmp/gemini_webapi
       # Persist generated images across container restarts
       - ./generated_images:/app/generated_images
     environment:

@@ -72,7 +72,12 @@ class ImageDownloadRequest(BaseModel):
 
 
 class RefreshCookieRequest(BaseModel):
-    cookies: dict[str, str]
+    cookies: dict[str, str] | str
+    """
+    Cookie data. Accepts either:
+    - A dict: {"__Secure-1PSID": "...", "__Secure-1PSIDTS": "..."}
+    - A raw JSON string that will be parsed automatically.
+    """
 
 
 class RefreshCookieResponse(BaseModel):

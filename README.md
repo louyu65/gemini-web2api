@@ -6,6 +6,7 @@
 - 🖼️ 识图（Vision，支持 base64 / URL / 本地文件）
 - 🎨 生图（Image Generations，依赖 Gemini 的图像生成能力）
 - ⚡ 流式输出（SSE Streaming）
+- 🔔 Cookie 健康监控与飞书告警
 
 ---
 
@@ -15,14 +16,17 @@
 .
 ├── api/
 │   ├── __init__.py
+│   ├── config.py          # 全局配置（路径、环境变量等）
 │   ├── models.py          # OpenAI 兼容的请求/响应 Pydantic 模型
+│   ├── utils.py           # 通用工具函数（ID 生成、图片下载/保存等）
 │   ├── gemini_service.py  # GeminiClient 单例封装
+│   ├── monitor.py         # Cookie 健康监控与飞书告警
 │   └── main.py            # FastAPI 路由与业务逻辑
 ├── run.py                 # 启动入口
 ├── tests/
 │   ├── cookie.json        # 你的 Google Cookie
 │   └── Gemini-API-master/ # 原始逆向库源码
-└── README_API.md          # 本文件
+└── README.md              # 本文件
 ```
 
 ---
@@ -32,7 +36,7 @@
 ### 1. 安装依赖
 
 ```bash
-pip install fastapi uvicorn python-multipart aiohttp
+pip install -r requirements.txt
 ```
 
 `gemini_webapi` 无需 pip 安装，代码已通过 `sys.path` 指向本地 `tests/Gemini-API-master/src`。
@@ -70,6 +74,12 @@ python run.py
 
 ```bash
 uvicorn run:app --host 0.0.0.0 --port 8000
+```
+
+### 方式三：Docker
+
+```bash
+docker-compose up -d
 ```
 
 ---
@@ -264,7 +274,19 @@ print(resp.choices[0].message.content)
 
 ### 6. 运行时刷新 Cookie
 
-无需重启服务即可更新 Cookie：
+无需重启服务即可更新 Cookie。支持两种输入方式：
+
+#### A. JSON 字符串（推荐，从浏览器控制台直接复制）
+
+```bash
+curl http://localhost:8000/v1/admin/refresh-cookie \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cookies": "{\"__Secure-1PSID\": \"g.a000xxxx...\", \"__Secure-1PSIDTS\": \"sidts-CjcBxxxx...\"}"
+  }'
+```
+
+#### B. JSON 对象
 
 ```bash
 curl http://localhost:8000/v1/admin/refresh-cookie \
@@ -298,18 +320,32 @@ curl http://localhost:8000/v1/admin/refresh-cookie \
 | `UNAUTHENTICATED` | Cookie 过期 | 重新从浏览器导出 `__Secure-1PSID` 和 `__Secure-1PSIDTS` |
 | `TLS connect error` | `curl-cffi` 版本不兼容 | `pip install -U "curl-cffi~=0.15.0"` |
 | 返回空内容 | Gemini 风控或模型未响应 | 检查 `cookie.json` 是否有效，或尝试更换模型 |
+| 图片下载失败 | 本地 session Cookie 失效 | 先调用 `/v1/admin/refresh-cookie` 刷新 Cookie |
 
 ---
 
 ## 进阶配置
 
+### 环境变量
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `FEISHU_WEBHOOK` | 飞书机器人 Webhook URL，用于 Cookie 失效告警 | `""` |
+| `COOKIE_CHECK_INTERVAL` | Cookie 健康检查间隔（秒） | `300` |
+| `PORT` | 服务监听端口 | `8000` |
+
 ### 修改 Cookie 路径
 
-编辑 [`api/gemini_service.py`](api/gemini_service.py) 中 `get_instance()` 的默认参数，或修改 [`run.py`](run.py)。
+编辑 [`api/config.py`](api/config.py) 中的 `DEFAULT_COOKIE_PATH`，或启动时指定：
+
+```python
+# api/config.py
+DEFAULT_COOKIE_PATH = BASE_DIR / "tests" / "cookie.json"
+```
 
 ### 添加代理
 
-在 `GeminiClient` 初始化时传入 `proxy` 参数：
+在 `GeminiClient` 初始化时传入 `proxy` 参数（位于 [`api/gemini_service.py`](api/gemini_service.py)）：
 
 ```python
 self.client = GeminiClient(

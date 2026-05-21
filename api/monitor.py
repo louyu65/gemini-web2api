@@ -93,15 +93,25 @@ class CookieMonitor:
         if client is None:
             return
 
+        # Re-fetch user status from the server so we detect
+        # cookie expiration that happens while the service is running.
         try:
-            status = getattr(client, "account_status", None)
-            if status is None:
-                return
-            is_ok = "UNAUTHENTICATED" not in str(status)
-            status_str = f"{status.name} ({status.value})" if hasattr(status, "name") else str(status)
+            await client._fetch_user_status()
         except Exception as exc:
-            print(f"[CookieMonitor] Failed to read status: {exc}")
-            return
+            print(f"[CookieMonitor] _fetch_user_status failed: {exc}")
+            # Treat failure as invalid
+            status_str = "UNKNOWN (fetch failed)"
+            is_ok = False
+        else:
+            try:
+                status = getattr(client, "account_status", None)
+                if status is None:
+                    return
+                is_ok = "UNAUTHENTICATED" not in str(status)
+                status_str = f"{status.name} ({status.value})" if hasattr(status, "name") else str(status)
+            except Exception as exc:
+                print(f"[CookieMonitor] Failed to read status: {exc}")
+                return
 
         if is_ok:
             if not self._last_known_ok:

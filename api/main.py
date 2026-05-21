@@ -5,13 +5,9 @@ Provides OpenAI-compatible endpoints for chat completions and image generation.
 
 import asyncio
 import base64
-import hashlib
 import json
 import os
 import sys
-import tempfile
-import time
-import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
@@ -23,7 +19,6 @@ from fastapi.staticfiles import StaticFiles
 # Ensure local gemini_webapi is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests" / "Gemini-API-master" / "src"))
 
-from gemini_webapi import GeminiClient
 from gemini_webapi.types import ModelOutput
 
 from .models import (
@@ -41,24 +36,16 @@ from .models import (
 )
 from .gemini_service import GeminiService
 from .monitor import CookieMonitor
-
-
-# ---------------------------------------------------------------------------
-# Image storage
-# ---------------------------------------------------------------------------
-
-IMAGE_DIR = Path(__file__).resolve().parent.parent / "generated_images"
-IMAGE_DIR.mkdir(exist_ok=True)
-
-
-def _local_image_url(filename: str, request: Request | None = None) -> str:
-    """Build the publicly accessible URL for a stored image."""
-    if request is not None:
-        base = str(request.base_url).rstrip("/")
-        return f"{base}/images/{filename}"
-    # Fallback for cases where request context is unavailable
-    port = os.getenv("PORT", "8000")
-    return f"http://127.0.0.1:{port}/images/{filename}"
+from .config import IMAGE_DIR, COOKIE_CHECK_INTERVAL
+from .utils import (
+    gen_id,
+    now_ts,
+    extract_prompt_and_files,
+    resolve_files,
+    guess_mime_from_response,
+    save_image,
+    local_image_url,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +58,7 @@ async def lifespan(app: FastAPI):
     app.state.gemini = service
 
     # Start background cookie health monitor
-    interval = int(os.getenv("COOKIE_CHECK_INTERVAL", "300"))
-    monitor = CookieMonitor(service, interval=interval)
+    monitor = CookieMonitor(service, interval=COOKIE_CHECK_INTERVAL)
     monitor.start()
     app.state.monitor = monitor
 
@@ -95,102 +81,21 @@ app.mount("/images", StaticFiles(directory=str(IMAGE_DIR)), name="images")
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _gen_id(prefix: str = "chatcmpl") -> str:
-    return f"{prefix}-{uuid.uuid4().hex[:12]}"
-
-
-def _now_ts() -> int:
-    return int(time.time())
-
-
-async def _download_image(url: str) -> str:
-    """Download a remote image to a temp file and return the local path."""
-    import aiohttp
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            data = await resp.read()
-            suffix = Path(url.split("?")[0]).suffix or ".png"
-            fd, path = tempfile.mkstemp(suffix=suffix)
-            with open(fd, "wb") as f:
-                f.write(data)
-            return path
-
-
-def _extract_prompt_and_files(messages: list[dict]) -> tuple[str, list[str]]:
-    """
-    Convert OpenAI-style messages into a plain prompt + list of local file paths.
-    Supports vision input via image_url (base64, file://, http://).
-    """
-    prompt_parts = []
-    files: list[str] = []
-
-    for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-
-        if isinstance(content, str):
-            prompt_parts.append(f"[{role}]: {content}")
-        elif isinstance(content, list):
-            text_parts = []
-            for part in content:
-                ptype = part.get("type")
-                if ptype == "text":
-                    text_parts.append(part.get("text", ""))
-                elif ptype == "image_url":
-                    url = part.get("image_url", {}).get("url", "")
-                    if url.startswith("data:image"):
-                        header, b64 = url.split(",", 1)
-                        ext = header.split(";")[0].split("/")[-1] or "png"
-                        fd, path = tempfile.mkstemp(suffix=f".{ext}")
-                        with open(fd, "wb") as f:
-                            f.write(base64.b64decode(b64))
-                        files.append(path)
-                        text_parts.append("[image attached]")
-                    elif url.startswith("file:///"):
-                        files.append(url.replace("file:///", ""))
-                        text_parts.append("[image attached]")
-                    elif url.startswith("http"):
-                        # Will be downloaded async later
-                        files.append(f"__url__:{url}")
-                        text_parts.append("[image attached]")
-                    else:
-                        files.append(url)
-                        text_parts.append("[image attached]")
-            prompt_parts.append(f"[{role}]: {' '.join(text_parts)}")
-
-    return "\n".join(prompt_parts), files
-
-
-async def _resolve_files(files: list[str]) -> list[str]:
-    """Resolve any __url__: prefix entries by downloading them."""
-    resolved = []
-    for f in files:
-        if isinstance(f, str) and f.startswith("__url__:"):
-            resolved.append(await _download_image(f[8:]))
-        else:
-            resolved.append(f)
-    return resolved
-
-
-# ---------------------------------------------------------------------------
 # Chat Completions
 # ---------------------------------------------------------------------------
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest):
     service: GeminiService = app.state.gemini
-    prompt, files = _extract_prompt_and_files(
+    prompt, files = extract_prompt_and_files(
         [m.model_dump() for m in req.messages]
     )
-    files = await _resolve_files(files)
+    files = await resolve_files(files)
 
     if req.stream:
         async def event_stream() -> AsyncGenerator[str, None]:
-            cid = _gen_id()
-            created = _now_ts()
+            cid = gen_id()
+            created = now_ts()
 
             # Role chunk
             yield f"data: {json.dumps({
@@ -202,8 +107,6 @@ async def chat_completions(req: ChatCompletionRequest):
             }, ensure_ascii=False)}\n\n"
 
             try:
-                # Note: generate_content_stream is an async generator function;
-                # do NOT await it, just call it and iterate.
                 stream_gen = service.client.generate_content_stream(
                     prompt, files=files or None
                 )
@@ -250,8 +153,8 @@ async def chat_completions(req: ChatCompletionRequest):
     text = getattr(output, "text", "") or ""
 
     return ChatCompletionResponse(
-        id=_gen_id(),
-        created=_now_ts(),
+        id=gen_id(),
+        created=now_ts(),
         model=req.model,
         choices=[
             Choice(
@@ -302,7 +205,7 @@ async def image_generations(req: ImageGenerationRequest, request: Request):
                 http_resp = await service.client.client.get(url)
                 if http_resp.status_code == 200:
                     image_bytes = http_resp.content
-                    mime = _guess_mime_from_response(http_resp)
+                    mime = guess_mime_from_response(http_resp)
             except Exception:
                 pass
 
@@ -318,13 +221,13 @@ async def image_generations(req: ImageGenerationRequest, request: Request):
             continue
 
         # Optionally persist to local cache (deduplicated)
-        _save_image(image_bytes, f".{mime.split('/')[-1]}")
+        save_image(image_bytes, f".{mime.split('/')[-1]}")
 
         if req.response_format == "url":
             # Serve via local static URL (requires StaticFiles mount)
-            filename = _save_image(image_bytes, f".{mime.split('/')[-1]}")
-            local_url = _local_image_url(filename, request)
-            data_list.append(ImageData(url=local_url, revised_prompt=req.prompt))
+            filename = save_image(image_bytes, f".{mime.split('/')[-1]}")
+            url_out = local_image_url(filename, str(request.base_url))
+            data_list.append(ImageData(url=url_out, revised_prompt=req.prompt))
         else:
             # Default: return base64 so clients get the image inline without extra auth
             b64_str = base64.b64encode(image_bytes).decode("utf-8")
@@ -332,30 +235,12 @@ async def image_generations(req: ImageGenerationRequest, request: Request):
 
     if not data_list:
         # If no images were returned, surface any text response from Gemini
-        # (e.g. refusal message, policy explanation) so the caller knows why.
         fallback_text = getattr(output, "text", "") or ""
         data_list.append(
             ImageData(revised_prompt=fallback_text or req.prompt)
         )
 
-    return ImageGenerationResponse(created=_now_ts(), data=data_list)
-
-
-def _guess_mime_from_response(resp) -> str:
-    """Guess MIME type from response headers."""
-    ct = resp.headers.get("content-type", "image/png")
-    return ct.split(";")[0].strip().lower()
-
-
-def _save_image(data: bytes, ext: str) -> str:
-    """Save image bytes to IMAGE_DIR and return the filename."""
-    digest = hashlib.sha256(data).hexdigest()[:16]
-    filename = f"{digest}{ext}"
-    path = IMAGE_DIR / filename
-    if not path.exists():
-        with open(path, "wb") as f:
-            f.write(data)
-    return filename
+    return ImageGenerationResponse(created=now_ts(), data=data_list)
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +262,6 @@ async def image_download(req: ImageDownloadRequest):
         )
 
     try:
-        # Use the same AsyncSession that holds the authenticated cookies
         http_resp = await service.client.client.get(req.url)
     except Exception as exc:
         return JSONResponse(
@@ -461,11 +345,43 @@ async def health():
 async def refresh_cookie(req: RefreshCookieRequest):
     """
     Refresh cookies at runtime without restarting the service.
+    Accepts either a JSON dict or a raw JSON string.
     The new cookies will be persisted to the local cookie file.
     """
     service: GeminiService = app.state.gemini
+
+    # Parse cookies: dict or JSON string
+    raw = req.cookies
+    if isinstance(raw, str):
+        try:
+            cookies = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "message": f"Invalid JSON string in cookies: {exc}",
+                        "type": "invalid_request",
+                        "code": "bad_request",
+                    }
+                },
+            )
+        if not isinstance(cookies, dict):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "message": "Parsed cookies must be a JSON object.",
+                        "type": "invalid_request",
+                        "code": "bad_request",
+                    }
+                },
+            )
+    else:
+        cookies = raw
+
     try:
-        result = await service.refresh_cookie(req.cookies)
+        result = await service.refresh_cookie(cookies)
         return RefreshCookieResponse(
             success=True,
             account_status=result.get("account_status", "unknown"),

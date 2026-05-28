@@ -1,15 +1,20 @@
 /**
  * Gemini Cookie Sync — Background Service Worker
  *
- * Listens for Google cookie changes and periodically pushes
- * __Secure-1PSID / __Secure-1PSIDTS to the configured server.
+ * 1. Listens for Google cookie changes → pushes immediately (debounced 2s)
+ * 2. Checks /health every 1 minute → pushes if account is degraded
+ * 3. Full cookie push every 30 minutes (safety net)
  */
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-const ALARM_NAME = 'gemini-cookie-push';
-const ALARM_PERIOD_MINUTES = 30;
+const PUSH_ALARM = 'gemini-cookie-push';
+const PUSH_INTERVAL_MINUTES = 30;
+
+const HEALTH_ALARM = 'gemini-health-check';
+const HEALTH_INTERVAL_MINUTES = 1;
+
 const DEBOUNCE_MS = 2000;
 
 // ---------------------------------------------------------------------------
@@ -29,20 +34,16 @@ async function pushCookies() {
 
   const url = serverUrl.replace(/\/+$/, '') + '/v1/extension/refresh-cookie';
 
-  // Read both cookies in parallel
-  const [psid, psidts] = await Promise.all([
-    chrome.cookies.get({ url: 'https://www.google.com', name: '__Secure-1PSID' }),
-    chrome.cookies.get({ url: 'https://www.google.com', name: '__Secure-1PSIDTS' }),
-  ]);
-
-  if (!psid || !psid.value) {
-    return { success: false, error: '__Secure-1PSID not found — not logged in?' };
+  // Read ALL non-expired google.com cookies
+  const allCookies = await chrome.cookies.getAll({ domain: 'google.com' });
+  const cookies = {};
+  for (const c of allCookies) {
+    if (!c.value) continue;
+    cookies[c.name] = c.value;
   }
 
-  const cookies = {};
-  cookies['__Secure-1PSID'] = psid.value;
-  if (psidts && psidts.value) {
-    cookies['__Secure-1PSIDTS'] = psidts.value;
+  if (!cookies['__Secure-1PSID']) {
+    return { success: false, error: '__Secure-1PSID not found — not logged in?' };
   }
 
   try {
@@ -82,6 +83,38 @@ async function pushCookies() {
 }
 
 // ---------------------------------------------------------------------------
+// Health check — if degraded, trigger push immediately
+// ---------------------------------------------------------------------------
+
+async function checkHealthAndPush() {
+  const { serverUrl, authToken } = await chrome.storage.sync.get([
+    'serverUrl',
+    'authToken',
+  ]);
+  if (!serverUrl) return;
+
+  const url = serverUrl.replace(/\/+$/, '') + '/health';
+
+  try {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return;
+
+    const data = await resp.json();
+    const status = (data.status || '').toLowerCase();
+    const accountStatus = (data.account_status || '').toLowerCase();
+
+    // Only push when account is degraded / unauthenticated
+    if (status === 'degraded' || accountStatus.includes('unauthenticated')) {
+      console.log('[GeminiCookieSync] Health check: degraded, pushing cookies');
+      await pushCookies();
+    }
+  } catch (err) {
+    // Network error — silently ignore, will retry next interval
+    console.log('[GeminiCookieSync] Health check failed:', err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Debounce helper
 // ---------------------------------------------------------------------------
 
@@ -105,7 +138,6 @@ chrome.cookies.onChanged.addListener((changeInfo) => {
   const name = changeInfo.cookie.name;
   const domain = changeInfo.cookie.domain;
 
-  // Only care about Google auth cookies
   if (name === '__Secure-1PSID' && domain && domain.includes('google')) {
     console.log('[GeminiCookieSync] __Secure-1PSID changed, scheduling push');
     debouncedPush();
@@ -113,13 +145,15 @@ chrome.cookies.onChanged.addListener((changeInfo) => {
 });
 
 // ---------------------------------------------------------------------------
-// Periodic alarm — safety net
+// Alarm handlers
 // ---------------------------------------------------------------------------
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM_NAME) {
-    console.log('[GeminiCookieSync] Alarm fired, pushing cookies');
+  if (alarm.name === PUSH_ALARM) {
+    console.log('[GeminiCookieSync] Periodic push alarm fired');
     pushCookies();
+  } else if (alarm.name === HEALTH_ALARM) {
+    checkHealthAndPush();
   }
 });
 
@@ -128,9 +162,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // ---------------------------------------------------------------------------
 
 chrome.runtime.onInstalled.addListener((details) => {
-  // Create periodic alarm
-  chrome.alarms.create(ALARM_NAME, {
-    periodInMinutes: ALARM_PERIOD_MINUTES,
+  chrome.alarms.create(PUSH_ALARM, {
+    periodInMinutes: PUSH_INTERVAL_MINUTES,
+  });
+
+  chrome.alarms.create(HEALTH_ALARM, {
+    periodInMinutes: HEALTH_INTERVAL_MINUTES,
   });
 
   if (details.reason === 'install') {
@@ -145,7 +182,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'pushNow') {
     pushCookies().then(sendResponse);
-    return true; // keep channel open for async response
+    return true;
   }
   if (message.action === 'getStatus') {
     chrome.storage.local.get([

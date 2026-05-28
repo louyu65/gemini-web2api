@@ -10,6 +10,22 @@ function getStatusLabel(status) {
   return { text: '❌ 失败', cls: 'error' };
 }
 
+function getHealthLabel(status, accountStatus) {
+  if (!status) return { text: '❓ 未知', cls: '' };
+  if (status === 'ok') return { text: '✅ 正常', cls: 'success' };
+  if (status === 'degraded') {
+    const detail = accountStatus ? ` (${accountStatus})` : '';
+    return { text: `⚠️ 异常${detail}`, cls: 'warning' };
+  }
+  return { text: `❌ ${status}`, cls: 'error' };
+}
+
+function extractShortStatus(accountStatus) {
+  if (!accountStatus) return '';
+  // e.g. "AVAILABLE (0)" → "AVAILABLE"
+  return accountStatus.split('(')[0].trim();
+}
+
 // Load config + status
 async function refreshDisplay() {
   const config = await chrome.storage.sync.get(['serverUrl']);
@@ -36,6 +52,31 @@ async function refreshDisplay() {
     errorEl.textContent = `上次错误: ${status.lastError}`;
   } else {
     errorEl.textContent = '';
+  }
+
+  // Check server health
+  const healthEl = document.getElementById('healthDisplay');
+  if (config.serverUrl) {
+    try {
+      const url = config.serverUrl.replace(/\/+$/, '') + '/health';
+      const resp = await fetch(url, { signal: AbortSignal.timeout(3000) });
+      if (resp.ok) {
+        const data = await resp.json();
+        const shortStatus = extractShortStatus(data.account_status);
+        const hl = getHealthLabel(data.status, shortStatus);
+        healthEl.textContent = hl.text;
+        healthEl.className = `value ${hl.cls}`;
+      } else {
+        healthEl.textContent = `❌ HTTP ${resp.status}`;
+        healthEl.className = 'value error';
+      }
+    } catch (err) {
+      healthEl.textContent = '❌ 连接失败';
+      healthEl.className = 'value error';
+    }
+  } else {
+    healthEl.textContent = '未配置';
+    healthEl.className = 'value';
   }
 }
 

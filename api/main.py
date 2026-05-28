@@ -15,6 +15,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 
 # Ensure local gemini_webapi is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests" / "Gemini-API-master" / "src"))
@@ -74,6 +75,15 @@ app = FastAPI(
     description="OpenAI-compatible REST API for Google Gemini (web).",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+# Allow CORS for Chrome extension requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Serve generated images statically
@@ -445,6 +455,7 @@ async def extension_refresh_cookie(req: Request):
     service: GeminiService = app.state.gemini
     try:
         result = await service.refresh_cookie(cookies)
+        print(f"[Extension] Cookie refreshed. Account status: {result.get('account_status', 'unknown')}")
         return {
             "success": True,
             "account_status": result.get("account_status", "unknown"),

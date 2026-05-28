@@ -6,10 +6,10 @@ services:
     image: gemini-api-wrapper:latest
     container_name: gemini-api
     ports:
-      - "8000:8000"
+      - "8005:8000"
     volumes:
-      # Mount your cookie file into the container (read-only is fine)
-      - ./tests/cookie.json:/app/tests/cookie.json:ro
+      # Mount your cookie file into the container (read-write for auto-refresh)
+      - ./tests/cookie.json:/app/tests/cookie.json
       # Persist auto-refreshed cookies across container restarts
       #- ./gemini_cookies:/tmp/gemini_webapi
       # Persist generated images across container restarts

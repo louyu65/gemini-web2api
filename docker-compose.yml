@@ -23,8 +23,9 @@ services:
       # - COOKIE_CHECK_INTERVAL=300
       # Optional: proxy support (uncomment if needed)
       # - HTTPS_PROXY=http://host.docker.internal:7890
-      # Chrome extension auth token for automatic cookie refresh
-      # Generate a random string and configure it in the extension settings.
+      # Global auth token. When set, ALL endpoints (except /health) require
+      # Authorization: Bearer <token>. Chrome extension uses the same token.
+      # Leave unset for no auth (local-only mode).
       # - COOKIE_REFRESH_TOKEN=your-secure-token-here
     restart: unless-stopped
     healthcheck:

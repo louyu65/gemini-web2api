@@ -91,6 +91,33 @@ app.mount("/images", StaticFiles(directory=str(IMAGE_DIR)), name="images")
 
 
 # ---------------------------------------------------------------------------
+# Global auth middleware
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    # Skip auth when no token is configured (backward compatible)
+    # Also skip auth for health checks, static files, and CORS preflight
+    if COOKIE_REFRESH_TOKEN:
+        path = request.url.path
+        if (
+            path == "/health"
+            or path.startswith("/images/")
+            or request.method == "OPTIONS"
+        ):
+            return await call_next(request)
+
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            return JSONResponse(status_code=401, content={"error": "Missing Authorization header"})
+        token = auth[len("Bearer "):].strip()
+        if token != COOKIE_REFRESH_TOKEN:
+            return JSONResponse(status_code=401, content={"error": "Invalid token"})
+
+    return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
 # Chat Completions
 # ---------------------------------------------------------------------------
 

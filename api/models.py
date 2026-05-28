@@ -85,3 +85,7 @@ class RefreshCookieResponse(BaseModel):
     account_status: str
     description: str
     message: str
+
+
+class ExtensionRefreshCookieRequest(BaseModel):
+    cookies: dict[str, str]

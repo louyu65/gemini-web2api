@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Gemini Cookie Sync — Settings</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; padding: 24px; width: 400px; }
+    label { display: block; margin-top: 16px; font-weight: 600; }
+    input { display: block; width: 100%; margin-top: 4px; padding: 8px; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
+    button { margin-top: 20px; padding: 10px 20px; background: #1a73e8; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
+    button:hover { background: #1557b0; }
+    #status { margin-top: 12px; font-size: 13px; }
+    .hint { font-size: 12px; color: #666; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <h2>⚙️ 设置</h2>
+
+  <label for="serverUrl">服务器地址</label>
+  <input id="serverUrl" type="url" placeholder="http://localhost:8000" />
+  <div class="hint">你的 Gemini API 服务地址</div>
+
+  <label for="authToken">认证 Token</label>
+  <input id="authToken" type="text" placeholder="输入你的 Token" />
+  <div class="hint">与服务端 COOKIE_REFRESH_TOKEN 保持一致</div>
+
+  <button id="saveBtn">保存</button>
+  <div id="status"></div>
+
+  <script src="options.js"></script>
+</body>
+</html>

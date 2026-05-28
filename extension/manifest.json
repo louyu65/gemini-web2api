@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini Cookie Sync",
+  "version": "1.0",
+  "description": "Automatically sync Gemini cookies to your local API server",
+  "permissions": [
+    "cookies",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://*.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Gemini Cookie Sync"
+  },
+  "options_page": "options.html",
+  "icons": {
+    "128": "icon.png"
+  }
+}

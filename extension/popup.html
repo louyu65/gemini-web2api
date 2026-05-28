@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Gemini Cookie Sync</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; padding: 16px; width: 320px; }
+    h3 { margin: 0 0 12px; font-size: 15px; }
+    .row { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 13px; }
+    .label { color: #666; }
+    .value { font-weight: 500; }
+    .success { color: #188038; }
+    .error { color: #d93025; }
+    .pending { color: #e37400; }
+    button { width: 100%; margin-top: 12px; padding: 8px; background: #1a73e8; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    button:hover { background: #1557b0; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    .hint { font-size: 11px; color: #999; margin-top: 8px; text-align: center; }
+    #errorMsg { font-size: 12px; color: #d93025; margin-top: 6px; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <h3>🔑 Gemini Cookie Sync</h3>
+
+  <div class="row">
+    <span class="label">服务器</span>
+    <span class="value" id="serverDisplay">未配置</span>
+  </div>
+  <div class="row">
+    <span class="label">上次推送</span>
+    <span class="value" id="lastPushDisplay">-</span>
+  </div>
+  <div class="row">
+    <span class="label">状态</span>
+    <span class="value" id="statusDisplay">未知</span>
+  </div>
+
+  <div id="errorMsg"></div>
+
+  <button id="pushBtn">立即推送</button>
+  <div class="hint">打开扩展设置页面配置服务器地址和 Token</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

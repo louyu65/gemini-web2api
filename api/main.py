@@ -36,7 +36,7 @@ from .models import (
 )
 from .gemini_service import GeminiService
 from .monitor import CookieMonitor
-from .config import IMAGE_DIR, COOKIE_CHECK_INTERVAL
+from .config import IMAGE_DIR, COOKIE_CHECK_INTERVAL, COOKIE_REFRESH_TOKEN
 from .utils import (
     gen_id,
     now_ts,
@@ -388,6 +388,69 @@ async def refresh_cookie(req: RefreshCookieRequest):
             description=result.get("description", ""),
             message="Cookie refreshed and persisted successfully.",
         )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error": {
+                    "message": f"Failed to refresh cookie: {exc}",
+                    "type": "upstream_error",
+                    "code": "bad_gateway",
+                }
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
+# Extension: cookie refresh with token auth
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/extension/refresh-cookie")
+async def extension_refresh_cookie(req: Request):
+    """
+    Receive cookies from the Chrome extension and refresh at runtime.
+    Requires Authorization: Bearer <token> matching COOKIE_REFRESH_TOKEN.
+    """
+    # Validate token
+    auth = req.headers.get("authorization", "")
+    if not auth.startswith("Bearer "):
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Missing or invalid Authorization header"},
+        )
+    token = auth[len("Bearer "):].strip()
+    if not COOKIE_REFRESH_TOKEN or token != COOKIE_REFRESH_TOKEN:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid token"},
+        )
+
+    # Parse body
+    try:
+        body = await req.json()
+    except Exception as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid JSON body: {exc}"},
+        )
+
+    cookies = body.get("cookies")
+    if not isinstance(cookies, dict) or "__Secure-1PSID" not in cookies:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Missing __Secure-1PSID in cookies"},
+        )
+
+    # Refresh
+    service: GeminiService = app.state.gemini
+    try:
+        result = await service.refresh_cookie(cookies)
+        return {
+            "success": True,
+            "account_status": result.get("account_status", "unknown"),
+            "description": result.get("description", ""),
+            "message": "Cookie refreshed successfully from extension.",
+        }
     except Exception as exc:
         return JSONResponse(
             status_code=502,

@@ -23,6 +23,9 @@ services:
       # - COOKIE_CHECK_INTERVAL=300
       # Optional: proxy support (uncomment if needed)
       # - HTTPS_PROXY=http://host.docker.internal:7890
+      # Chrome extension auth token for automatic cookie refresh
+      # Generate a random string and configure it in the extension settings.
+      # - COOKIE_REFRESH_TOKEN=your-secure-token-here
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]

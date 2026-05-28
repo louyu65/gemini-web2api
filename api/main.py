@@ -15,7 +15,6 @@ from typing import AsyncGenerator
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
 
 # Ensure local gemini_webapi is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tests" / "Gemini-API-master" / "src"))
@@ -77,44 +76,45 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Allow CORS for Chrome extension requests
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Serve generated images statically
 app.mount("/images", StaticFiles(directory=str(IMAGE_DIR)), name="images")
 
 
 # ---------------------------------------------------------------------------
-# Global auth middleware
+# Combined CORS + auth middleware
 # ---------------------------------------------------------------------------
 
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "*",
+    "Access-Control-Allow-Headers": "*",
+    "Access-Control-Allow-Credentials": "true",
+}
+
+
 @app.middleware("http")
-async def auth_middleware(request: Request, call_next):
-    # Skip auth when no token is configured (backward compatible)
-    # Also skip auth for health checks, static files, and CORS preflight
+async def cors_auth_middleware(request: Request, call_next):
+    # Handle CORS preflight
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=CORS_HEADERS)
+
+    # Global auth check (skip /health and static files)
     if COOKIE_REFRESH_TOKEN:
         path = request.url.path
-        if (
-            path == "/health"
-            or path.startswith("/images/")
-            or request.method == "OPTIONS"
-        ):
-            return await call_next(request)
+        if path != "/health" and not path.startswith("/images/"):
+            auth = request.headers.get("authorization", "")
+            if not auth.startswith("Bearer "):
+                return JSONResponse(status_code=401, content={"error": "Missing Authorization header"}, headers=CORS_HEADERS)
+            token = auth[len("Bearer "):].strip()
+            if token != COOKIE_REFRESH_TOKEN:
+                return JSONResponse(status_code=401, content={"error": "Invalid token"}, headers=CORS_HEADERS)
 
-        auth = request.headers.get("authorization", "")
-        if not auth.startswith("Bearer "):
-            return JSONResponse(status_code=401, content={"error": "Missing Authorization header"})
-        token = auth[len("Bearer "):].strip()
-        if token != COOKIE_REFRESH_TOKEN:
-            return JSONResponse(status_code=401, content={"error": "Invalid token"})
+    response = await call_next(request)
 
-    return await call_next(request)
+    # Attach CORS headers to every response
+    for key, value in CORS_HEADERS.items():
+        response.headers[key] = value
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -448,20 +448,6 @@ async def extension_refresh_cookie(req: Request):
     Receive cookies from the Chrome extension and refresh at runtime.
     Requires Authorization: Bearer <token> matching COOKIE_REFRESH_TOKEN.
     """
-    # Validate token
-    auth = req.headers.get("authorization", "")
-    if not auth.startswith("Bearer "):
-        return JSONResponse(
-            status_code=401,
-            content={"error": "Missing or invalid Authorization header"},
-        )
-    token = auth[len("Bearer "):].strip()
-    if not COOKIE_REFRESH_TOKEN or token != COOKIE_REFRESH_TOKEN:
-        return JSONResponse(
-            status_code=401,
-            content={"error": "Invalid token"},
-        )
-
     # Parse body
     try:
         body = await req.json()
@@ -482,14 +468,19 @@ async def extension_refresh_cookie(req: Request):
     service: GeminiService = app.state.gemini
     try:
         result = await service.refresh_cookie(cookies)
-        print(f"[Extension] Cookie refreshed. Account status: {result.get('account_status', 'unknown')}")
-        return {
-            "success": True,
-            "account_status": result.get("account_status", "unknown"),
-            "description": result.get("description", ""),
-            "message": "Cookie refreshed successfully from extension.",
-        }
+        account_status = result.get("account_status", "unknown")
+        print(f"[Extension] Cookie refreshed. Account status: {account_status}")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "account_status": account_status,
+                "description": result.get("description", ""),
+                "message": "Cookie refreshed successfully from extension.",
+            },
+        )
     except Exception as exc:
+        print(f"[Extension] Refresh failed: {exc}")
         return JSONResponse(
             status_code=502,
             content={

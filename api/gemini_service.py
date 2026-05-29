@@ -45,6 +45,10 @@ class GeminiService:
         """Build or rebuild the GeminiClient from a cookie dict."""
         psid = cookies.get("__Secure-1PSID", "")
         psidts = cookies.get("__Secure-1PSIDTS", "")
+        cookie_count = len(cookies)
+        psid_preview = psid[:10] + "..." + psid[-4:] if len(psid) > 14 else psid
+
+        print(f"[GeminiService] _build_client start: psid={psid_preview}, cookies={cookie_count}, has_psidts={bool(psidts)}")
 
         if not psid:
             raise RuntimeError("Missing __Secure-1PSID in cookie data")
@@ -55,37 +59,48 @@ class GeminiService:
             for k, v in cookies.items()
             if k not in {"__Secure-1PSID", "__Secure-1PSIDTS"}
         }
+        print(f"[GeminiService] Extra cookies: {len(extra)} ({sorted(extra.keys())})")
 
         import os
         import tempfile
         verify = os.getenv("GEMINI_VERIFY_SSL", "true").lower() != "false"
 
-        # Close old client first (this may save stale cookies to cache)
+        # Close old client first
         if self.client:
+            print("[GeminiService] Closing old client...")
             try:
                 await self.client.close()
-            except Exception:
-                pass
+                print("[GeminiService] Old client closed")
+            except Exception as e:
+                print(f"[GeminiService] Old client close warning: {e}")
             self.client = None
 
-        # NOW clear cache files — after old client is closed, so its
-        # save_cookies() doesn't re-create the cache we just deleted.
-        cache_dir = Path(os.getenv("GEMINI_COOKIE_PATH", tempfile.gettempdir())) / "gemini_webapi"
+        # Clear cache files — match _get_cookie_cache_dir() from rotate_1psidts.py
+        _gemini_cache = os.getenv("GEMINI_COOKIE_PATH")
+        cache_dir = Path(_gemini_cache) if _gemini_cache else Path(tempfile.gettempdir()) / "gemini_webapi"
         if cache_dir.exists():
+            cleared = 0
             for stale in cache_dir.glob(".cached_cookies_*.json"):
                 try:
                     stale.unlink()
-                    print(f"[GeminiService] Cleared stale cache: {stale.name}")
+                    cleared += 1
                 except Exception:
                     pass
+            if cleared:
+                print(f"[GeminiService] Cleared {cleared} cache file(s)")
 
+        # Create new client
+        print(f"[GeminiService] Creating new GeminiClient (psid={psid_preview})...")
         self.client = GeminiClient(
             secure_1psid=psid,
             secure_1psidts=psidts,
             cookies=extra or None,
             verify=verify,
         )
+
+        print("[GeminiService] Calling client.init()...")
         await self.client.init(auto_refresh=True, verbose=False)
+        print("[GeminiService] client.init() completed")
 
         # Log account status for diagnostics
         status = getattr(self.client, "account_status", None)
@@ -93,6 +108,15 @@ class GeminiService:
             print(f"[GeminiService] Account status: {status.name} ({status.value}) - {status.description}")
         else:
             print("[GeminiService] Account status: unknown")
+
+        # Verify the client can actually make requests
+        try:
+            await self.client._fetch_user_status()
+            refreshed_status = getattr(self.client, "account_status", None)
+            if refreshed_status:
+                print(f"[GeminiService] Post-init fetch_user_status: {refreshed_status.name} ({refreshed_status.value})")
+        except Exception as e:
+            print(f"[GeminiService] Post-init fetch_user_status failed: {e}")
 
     async def refresh_cookie(self, cookies: dict) -> dict:
         """

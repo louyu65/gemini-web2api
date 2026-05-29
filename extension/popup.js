@@ -22,18 +22,17 @@ function getHealthLabel(status, accountStatus) {
 
 function extractShortStatus(accountStatus) {
   if (!accountStatus) return '';
-  // e.g. "AVAILABLE (0)" → "AVAILABLE"
   return accountStatus.split('(')[0].trim();
 }
 
-// Load config + status
 async function refreshDisplay() {
-  const config = await chrome.storage.sync.get(['serverUrl']);
+  const config = await chrome.storage.sync.get(['serverUrl', 'autoPushEnabled']);
   const status = await chrome.storage.local.get([
     'lastPushTime',
     'lastPushStatus',
     'lastAccountStatus',
     'lastError',
+    'lastCookieCount',
   ]);
 
   document.getElementById('serverDisplay').textContent =
@@ -49,12 +48,20 @@ async function refreshDisplay() {
 
   const errorEl = document.getElementById('errorMsg');
   if (status.lastPushStatus === 'error' && status.lastError) {
-    errorEl.textContent = `上次错误: ${status.lastError}`;
+    errorEl.textContent = `错误: ${status.lastError}`;
   } else {
     errorEl.textContent = '';
   }
 
-  // Check server health
+  // Toggle
+  const toggle = document.getElementById('autoToggle');
+  toggle.checked = config.autoPushEnabled !== false;
+
+  // Debug info
+  document.getElementById('cookieCount').textContent =
+    status.lastCookieCount != null ? String(status.lastCookieCount) : '-';
+
+  // Server health
   const healthEl = document.getElementById('healthDisplay');
   if (config.serverUrl) {
     try {
@@ -93,5 +100,23 @@ document.getElementById('pushBtn').addEventListener('click', async () => {
   btn.textContent = '立即推送';
 });
 
-// Initial load
+// Auto-push toggle
+document.getElementById('autoToggle').addEventListener('change', async (e) => {
+  await chrome.storage.sync.set({ autoPushEnabled: e.target.checked });
+  console.log('[Popup] Auto-push:', e.target.checked ? 'enabled' : 'disabled');
+});
+
+// Copy last pushed cookies
+document.getElementById('copyBtn').addEventListener('click', async () => {
+  const { lastCookiesJson } = await chrome.storage.local.get(['lastCookiesJson']);
+  if (!lastCookiesJson) {
+    document.getElementById('copyStatus').textContent = '暂无数据';
+    return;
+  }
+  await navigator.clipboard.writeText(lastCookiesJson);
+  const el = document.getElementById('copyStatus');
+  el.textContent = '✅ 已复制';
+  setTimeout(() => { el.textContent = ''; }, 2000);
+});
+
 refreshDisplay();

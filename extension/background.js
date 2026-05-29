@@ -1,9 +1,14 @@
 /**
  * Gemini Cookie Sync — Background Service Worker
  *
- * 1. Listens for Google cookie changes → pushes immediately (debounced 2s)
- * 2. Checks /health every 1 minute → pushes if account is degraded
- * 3. Full cookie push every 30 minutes (safety net)
+ * Push triggers:
+ *   1. __Secure-1PSID 发生变化 (onChanged 事件) → 立即推 (防抖 2s)
+ *   2. 健康检查 degraded + cookie 变了 → 推
+ *   3. 每 30 分钟兜底 → cookie 变了才推
+ *
+ * 节流逻辑:
+ *   - 如果 cookie 内容和上次成功推送完全一致 → 跳过 (不浪费请求)
+ *   - 健康检查 degraded 但 cookie 没变 → 等用户重新登录
  */
 
 // ---------------------------------------------------------------------------
@@ -18,10 +23,53 @@ const HEALTH_INTERVAL_MINUTES = 1;
 const DEBOUNCE_MS = 2000;
 
 // ---------------------------------------------------------------------------
+// State (in-memory only, not persisted)
+// ---------------------------------------------------------------------------
+let lastPushedCookieHash = '';      // hash of last SUCCESSFULLY pushed cookies
+let lastPushAttemptTime = 0;        // timestamp of last pushCookies() call
+const MIN_PUSH_INTERVAL_MS = 30000; // 30s minimum between pushes with same cookies
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Build a stable hash string from a cookie dict (sorted keys). */
+function cookieHash(cookies) {
+  return Object.keys(cookies)
+    .sort()
+    .map(k => `${k}=${cookies[k]}`)
+    .join('&');
+}
+
+/** Summarize cookies for debug logging (partial values). */
+function summarizeCookies(cookies) {
+  const names = Object.keys(cookies).sort();
+  const psid = cookies['__Secure-1PSID'] || '';
+  const psidts = cookies['__Secure-1PSIDTS'] || '';
+  return {
+    names,
+    psidPrefix: psid.slice(0, 10) + '...' + psid.slice(-4),
+    psidtsPrefix: psidts ? psidts.slice(0, 10) + '...' + psidts.slice(-4) : '(none)',
+    count: names.length,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Push logic
 // ---------------------------------------------------------------------------
 
-async function pushCookies() {
+async function pushCookies(options = {}) {
+  const { force = false } = options;
+
+  // Check pause state (manual push with force bypasses pause)
+  if (!force) {
+    const { autoPushEnabled } = await chrome.storage.sync.get(['autoPushEnabled']);
+    if (autoPushEnabled === false) {
+      console.log('[Push] Auto-push is paused — skipping');
+      return { success: true, skipped: true, reason: 'paused' };
+    }
+  }
+
   const { serverUrl, authToken } = await chrome.storage.sync.get([
     'serverUrl',
     'authToken',
@@ -34,7 +82,7 @@ async function pushCookies() {
 
   const url = serverUrl.replace(/\/+$/, '') + '/v1/extension/refresh-cookie';
 
-  // Read ALL non-expired google.com cookies
+  // Read ALL google.com cookies
   const allCookies = await chrome.cookies.getAll({ domain: 'google.com' });
   const cookies = {};
   for (const c of allCookies) {
@@ -43,8 +91,29 @@ async function pushCookies() {
   }
 
   if (!cookies['__Secure-1PSID']) {
+    console.log('[Push] __Secure-1PSID not found — not logged in');
     return { success: false, error: '__Secure-1PSID not found — not logged in?' };
   }
+
+  // Dedup: skip if cookies haven't changed since last successful push
+  const hash = cookieHash(cookies);
+  const now = Date.now();
+  if (!force && hash === lastPushedCookieHash) {
+    console.log('[Push] Skipped: cookies unchanged since last successful push');
+    return { success: true, skipped: true, reason: 'unchanged' };
+  }
+
+  // Throttle: don't push too frequently with same cookies
+  if (!force && hash !== lastPushedCookieHash && (now - lastPushAttemptTime) < MIN_PUSH_INTERVAL_MS) {
+    console.log('[Push] Throttled: too soon since last attempt');
+    return { success: true, skipped: true, reason: 'throttled' };
+  }
+
+  // Debug log
+  const summary = summarizeCookies(cookies);
+  console.log('[Push] Sending cookies:', JSON.stringify(summary, null, 2));
+
+  lastPushAttemptTime = now;
 
   try {
     const resp = await fetch(url, {
@@ -56,20 +125,29 @@ async function pushCookies() {
       body: JSON.stringify({ cookies }),
     });
 
+    const text = await resp.text();
+
     if (!resp.ok) {
-      const text = await resp.text();
+      console.error('[Push] Server returned', resp.status, text);
       return { success: false, error: `HTTP ${resp.status}: ${text}` };
     }
 
-    const data = await resp.json();
-    const now = Date.now();
+    let data;
+    try { data = JSON.parse(text); } catch { data = {}; }
+
+    // Mark success — only update hash on successful push
+    lastPushedCookieHash = hash;
+
     await chrome.storage.local.set({
       lastPushTime: now,
       lastPushStatus: 'success',
       lastAccountStatus: data.account_status || 'unknown',
+      lastCookieCount: summary.count,
+      lastCookieNames: summary.names.join(', '),
+      lastCookiesJson: JSON.stringify(cookies, null, 2),
     });
 
-    console.log('[GeminiCookieSync] Push succeeded:', data.account_status);
+    console.log('[Push] Succeeded, account_status:', data.account_status, '| cookies pushed:', summary.count);
     return { success: true, account_status: data.account_status };
   } catch (err) {
     await chrome.storage.local.set({
@@ -77,21 +155,19 @@ async function pushCookies() {
       lastPushStatus: 'error',
       lastError: err.message,
     });
-    console.error('[GeminiCookieSync] Push failed:', err);
+    console.error('[Push] Failed:', err.message);
     return { success: false, error: err.message };
   }
 }
 
 // ---------------------------------------------------------------------------
-// Health check — if degraded, trigger push immediately
+// Health check — only push if degraded AND cookies have changed
 // ---------------------------------------------------------------------------
 
 async function checkHealthAndPush() {
-  const { serverUrl, authToken } = await chrome.storage.sync.get([
-    'serverUrl',
-    'authToken',
-  ]);
+  const { serverUrl, autoPushEnabled } = await chrome.storage.sync.get(['serverUrl', 'autoPushEnabled']);
   if (!serverUrl) return;
+  if (autoPushEnabled === false) return;
 
   const url = serverUrl.replace(/\/+$/, '') + '/health';
 
@@ -103,27 +179,47 @@ async function checkHealthAndPush() {
     const status = (data.status || '').toLowerCase();
     const accountStatus = (data.account_status || '').toLowerCase();
 
-    // Only push when account is degraded / unauthenticated
-    if (status === 'degraded' || accountStatus.includes('unauthenticated')) {
-      console.log('[GeminiCookieSync] Health check: degraded, pushing cookies');
-      await pushCookies();
+    if (status !== 'degraded' && !accountStatus.includes('unauthenticated')) {
+      return; // all good
     }
+
+    // Degraded — check if browser cookies have changed
+    const allCookies = await chrome.cookies.getAll({ domain: 'google.com' });
+    const cookies = {};
+    for (const c of allCookies) {
+      if (!c.value) continue;
+      cookies[c.name] = c.value;
+    }
+
+    const hash = cookieHash(cookies);
+    if (hash === lastPushedCookieHash) {
+      console.log('[Health] Degraded (' + accountStatus + ') but cookies unchanged — waiting for user re-login');
+      return;
+    }
+
+    // Cookies changed since last successful push — try pushing
+    console.log('[Health] Degraded but cookies differ — pushing');
+    await pushCookies();
   } catch (err) {
-    // Network error — silently ignore, will retry next interval
-    console.log('[GeminiCookieSync] Health check failed:', err.message);
+    console.log('[Health] Check failed:', err.message);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Debounce helper
+// Debounce helper for onChanged events
 // ---------------------------------------------------------------------------
 
 let debounceTimer = null;
 
 function debouncedPush() {
   if (debounceTimer) clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => {
+  debounceTimer = setTimeout(async () => {
     debounceTimer = null;
+    const { autoPushEnabled } = await chrome.storage.sync.get(['autoPushEnabled']);
+    if (autoPushEnabled === false) {
+      console.log('[Event] Auto-push is paused — ignoring cookie change');
+      return;
+    }
     pushCookies();
   }, DEBOUNCE_MS);
 }
@@ -139,7 +235,7 @@ chrome.cookies.onChanged.addListener((changeInfo) => {
   const domain = changeInfo.cookie.domain;
 
   if (name === '__Secure-1PSID' && domain && domain.includes('google')) {
-    console.log('[GeminiCookieSync] __Secure-1PSID changed, scheduling push');
+    console.log('[Event] __Secure-1PSID changed, scheduling push');
     debouncedPush();
   }
 });
@@ -150,7 +246,7 @@ chrome.cookies.onChanged.addListener((changeInfo) => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === PUSH_ALARM) {
-    console.log('[GeminiCookieSync] Periodic push alarm fired');
+    console.log('[Alarm] Periodic push (30min)');
     pushCookies();
   } else if (alarm.name === HEALTH_ALARM) {
     checkHealthAndPush();
@@ -162,13 +258,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // ---------------------------------------------------------------------------
 
 chrome.runtime.onInstalled.addListener((details) => {
-  chrome.alarms.create(PUSH_ALARM, {
-    periodInMinutes: PUSH_INTERVAL_MINUTES,
-  });
-
-  chrome.alarms.create(HEALTH_ALARM, {
-    periodInMinutes: HEALTH_INTERVAL_MINUTES,
-  });
+  chrome.alarms.create(PUSH_ALARM, { periodInMinutes: PUSH_INTERVAL_MINUTES });
+  chrome.alarms.create(HEALTH_ALARM, { periodInMinutes: HEALTH_INTERVAL_MINUTES });
 
   if (details.reason === 'install') {
     chrome.runtime.openOptionsPage();
@@ -181,7 +272,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'pushNow') {
-    pushCookies().then(sendResponse);
+    pushCookies({ force: true }).then(sendResponse);
     return true;
   }
   if (message.action === 'getStatus') {
@@ -190,6 +281,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       'lastPushStatus',
       'lastAccountStatus',
       'lastError',
+      'lastCookieCount',
+      'lastCookieNames',
+      'lastCookiesJson',
     ]).then(sendResponse);
     return true;
   }

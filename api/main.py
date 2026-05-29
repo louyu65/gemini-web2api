@@ -467,6 +467,12 @@ async def extension_refresh_cookie(req: Request):
     # Refresh
     service: GeminiService = app.state.gemini
     try:
+        # Log cookie summary for debugging
+        cookie_names = sorted(cookies.keys())
+        psid = cookies.get('__Secure-1PSID', '')
+        psid_preview = psid[:10] + '...' + psid[-4:] if len(psid) > 14 else psid
+        print(f"[Extension] Received {len(cookie_names)} cookies: {cookie_names}, __Secure-1PSID: {psid_preview}")
+
         result = await service.refresh_cookie(cookies)
         account_status = result.get("account_status", "unknown")
         print(f"[Extension] Cookie refreshed. Account status: {account_status}")

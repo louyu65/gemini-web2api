@@ -60,8 +60,16 @@ class GeminiService:
         import tempfile
         verify = os.getenv("GEMINI_VERIFY_SSL", "true").lower() != "false"
 
-        # Clear ALL stale cookie caches so get_access_token always uses
-        # the latest cookies from cookie.json or the API refresh call.
+        # Close old client first (this may save stale cookies to cache)
+        if self.client:
+            try:
+                await self.client.close()
+            except Exception:
+                pass
+            self.client = None
+
+        # NOW clear cache files — after old client is closed, so its
+        # save_cookies() doesn't re-create the cache we just deleted.
         cache_dir = Path(os.getenv("GEMINI_COOKIE_PATH", tempfile.gettempdir())) / "gemini_webapi"
         if cache_dir.exists():
             for stale in cache_dir.glob(".cached_cookies_*.json"):
@@ -70,14 +78,6 @@ class GeminiService:
                     print(f"[GeminiService] Cleared stale cache: {stale.name}")
                 except Exception:
                     pass
-
-        # Close old client if exists
-        if self.client:
-            try:
-                await self.client.close()
-            except Exception:
-                pass
-            self.client = None
 
         self.client = GeminiClient(
             secure_1psid=psid,
